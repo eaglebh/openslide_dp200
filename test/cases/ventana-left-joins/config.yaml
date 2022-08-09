@@ -1,0 +1,8 @@
+base: Ventana/Ventana-1.bif
+slide: Ventana-1.bif
+success: true
+vendor: ventana
+requires: [libtiff-4]
+primary: true
+properties:
+  openslide.vendor: ventana
