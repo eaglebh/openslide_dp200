@@ -68,7 +68,8 @@ bool _openslide_jpeg_add_associated_image(openslide_t *osr,
  * On Windows, we cannot fopen a file and pass it to another DLL that does fread.
  * So we need to compile all our freading into the OpenSlide DLL directly.
  */
-void _openslide_jpeg_stdio_src(j_decompress_ptr cinfo, FILE *infile);
+void _openslide_jpeg_stdio_src(j_decompress_ptr cinfo,
+                               struct _openslide_file *infile);
 
 /*
  * Some libjpegs don't provide mem_src, so we have our own copy.
@@ -96,5 +97,9 @@ void _openslide_jpeg_propagate_error(GError **err,
                                      struct _openslide_jpeg_decompress *dc);
 
 void _openslide_jpeg_decompress_destroy(struct _openslide_jpeg_decompress *dc);
+
+typedef struct _openslide_jpeg_decompress _openslide_jpeg_decompress;
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(_openslide_jpeg_decompress,
+                              _openslide_jpeg_decompress_destroy)
 
 #endif

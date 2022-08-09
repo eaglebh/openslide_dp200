@@ -20,11 +20,6 @@
  *
  */
 
-// don't complain about g_option_context_parse_strv(), which is called
-// conditionally
-#undef GLIB_VERSION_MAX_ALLOWED
-#define GLIB_VERSION_MAX_ALLOWED G_ENCODE_VERSION(2,40)
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,7 +30,7 @@
 
 static const char *version_format = "%s " SUFFIXED_VERSION ", "
 "using OpenSlide %s\n"
-"Copyright (C) 2007-2016 Carnegie Mellon University and others\n"
+"Copyright (C) 2007-2022 Carnegie Mellon University and others\n"
 "\n"
 "OpenSlide is free software: you can redistribute it and/or modify it under\n"
 "the terms of the GNU Lesser General Public License, version 2.1.\n"
@@ -59,10 +54,6 @@ static GOptionContext *make_option_context(const struct common_usage_info *info)
   g_option_context_add_main_entries(octx, options, NULL);
   return octx;
 }
-
-#if GLIB_CHECK_VERSION(2,40,0)
-
-#define CMDLINE_FREE_ARGS
 
 static char **fixed_argv;
 
@@ -93,25 +84,12 @@ bool common_parse_options(GOptionContext *ctx,
   return ret;
 }
 
-#else
-
-void common_fix_argv(int *argc G_GNUC_UNUSED, char ***argv G_GNUC_UNUSED) {}
-
-bool common_parse_options(GOptionContext *ctx,
-                          int *argc, char ***argv,
-                          GError **err) {
-  return g_option_context_parse(ctx, argc, argv, err);
-}
-
-#endif
-
 void common_parse_commandline(const struct common_usage_info *info,
                               int *argc, char ***argv) {
   GError *err = NULL;
 
-  GOptionContext *octx = make_option_context(info);
+  g_autoptr(GOptionContext) octx = make_option_context(info);
   common_parse_options(octx, argc, argv, &err);
-  g_option_context_free(octx);
 
   if (err) {
     fprintf(stderr, "%s: %s\n\n", g_get_prgname(), err->message);
@@ -126,9 +104,7 @@ void common_parse_commandline(const struct common_usage_info *info,
   // Remove "--" arguments; g_option_context_parse() doesn't
   for (int i = 0; i < *argc; i++) {
     if (!strcmp((*argv)[i], "--")) {
-#ifdef CMDLINE_FREE_ARGS
       free((*argv)[i]);
-#endif
       for (int j = i + 1; j <= *argc; j++) {
         (*argv)[j - 1] = (*argv)[j];
       }
@@ -139,12 +115,10 @@ void common_parse_commandline(const struct common_usage_info *info,
 }
 
 void common_usage(const struct common_usage_info *info) {
-  GOptionContext *octx = make_option_context(info);
+  g_autoptr(GOptionContext) octx = make_option_context(info);
 
-  gchar *help = g_option_context_get_help(octx, TRUE, NULL);
+  g_autofree gchar *help = g_option_context_get_help(octx, true, NULL);
   fprintf(stderr, "%s", help);
-  g_free(help);
 
-  g_option_context_free(octx);
   exit(2);
 }

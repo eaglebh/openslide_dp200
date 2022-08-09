@@ -97,10 +97,7 @@ int main(int argc, char **argv) {
   state.jobs = g_async_queue_new();
   state.completions = g_async_queue_new();
   for (int i = 0; i < threads; i++) {
-    if (g_thread_create(thread_func, &state, FALSE, NULL) == NULL) {
-      printf("Couldn't start thread\n");
-      return 1;
-    }
+    g_thread_unref(g_thread_new("reader", thread_func, &state));
   }
 
   // wait for threads to start
@@ -113,7 +110,7 @@ int main(int argc, char **argv) {
   int priming = 5 * threads;
   int64_t w, h;
   openslide_get_level0_dimensions(state.osr, &w, &h);
-  GTimer *timer = g_timer_new();
+  g_autoptr(GTimer) timer = g_timer_new();
   for (int64_t y = 0; y < h; y += TILE_SIZE) {
     for (int64_t x = 0; x < w; x += TILE_SIZE) {
       if (priming) {

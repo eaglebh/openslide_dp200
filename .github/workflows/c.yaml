@@ -1,0 +1,241 @@
+name: C
+
+on:
+  push:
+    branches: [main]
+    tags: ["*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: 1
+
+jobs:
+  tests:
+    name: Build
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    continue-on-error: ${{ matrix.failing || false }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            container: registry.fedoraproject.org/fedora:latest
+            extra: true
+          - os: ubuntu-latest
+            container: quay.io/centos/centos:stream8
+          # Use ubuntu-22.04 to get a newer Docker seccomp filter.  Otherwise
+          # "make check" fails with:
+          #     Spawning child failed: Failed to close file descriptor for child process (Operation not permitted)
+          - os: ubuntu-22.04
+            container: quay.io/centos/centos:stream9
+          - os: ubuntu-latest
+            container: debian:stable
+            ignore-fd-leaks: true
+          - os: ubuntu-20.04
+            ignore-fd-leaks: true
+          - os: ubuntu-22.04
+          - os: macos-latest
+            failing: true
+    steps:
+    # Quick way to get Python 3 on macOS
+    - name: Set up Python (macOS)
+      uses: actions/setup-python@v2
+      if: ${{ matrix.os == 'macos-latest' }}
+    - name: Install dependencies
+      run: |
+        case "${{ matrix.os }}" in
+        macos-latest)
+            brew install \
+                gcc make autoconf automake libtool pkg-config \
+                zlib \
+                libpng \
+                jpeg-turbo \
+                libtiff \
+                openjpeg \
+                gdk-pixbuf \
+                libxml2 \
+                sqlite \
+                cairo \
+                glib \
+                xdelta
+            python -m pip install --upgrade pip
+            pip install requests PyYAML
+            ;;
+        ubuntu-*)
+            case "${{ matrix.container }}" in
+            *fedora*|*centos*)
+                pyver=3
+                . /etc/os-release
+                case "$VERSION_ID" in
+                8)
+                    dnf config-manager --set-enabled powertools
+                    pyver=38
+                    python=python38
+                    ;;
+                9)
+                    dnf install -y 'dnf-command(config-manager)'
+                    dnf config-manager --set-enabled crb
+                    dnf copr enable -y bgilbert/xdelta
+                    ;;
+                *)
+                    extra=git-core
+                    ;;
+                esac
+
+                dnf install -y \
+                    gcc make autoconf automake libtool pkg-config \
+                    $python python${pyver}-requests python${pyver}-pyyaml \
+                    zlib-devel \
+                    libpng-devel \
+                    libjpeg-turbo-devel \
+                    libtiff-devel \
+                    openjpeg2-devel \
+                    gdk-pixbuf2-modules gdk-pixbuf2-devel \
+                    libxml2-devel \
+                    sqlite-devel \
+                    cairo-devel \
+                    glib2-devel \
+                    doxygen \
+                    xdelta libjpeg-turbo-utils $extra
+                ;;
+            *debian*|"")
+                if [ -n "${{ matrix.container }}" ]; then
+                    # Debian container
+                    jpeg=libjpeg-dev
+                else
+                    # Ubuntu, on host
+                    jpeg=libjpeg-turbo8-dev
+                    sudo=sudo
+                fi
+                $sudo apt-get update
+                $sudo apt-get -y install \
+                    gcc make autoconf automake libtool pkg-config \
+                    python3-requests python3-yaml \
+                    zlib1g-dev \
+                    libpng-dev \
+                    $jpeg \
+                    libtiff-dev \
+                    libopenjp2-7-dev \
+                    libgdk-pixbuf2.0-dev \
+                    libxml2-dev \
+                    libsqlite3-dev \
+                    libcairo2-dev \
+                    libglib2.0-dev \
+                    doxygen \
+                    xdelta3 libjpeg-turbo-progs
+                ;;
+            esac
+        esac
+    - name: Check out repo
+      uses: actions/checkout@v3
+    - name: Check for uninitialized g_auto variables
+      if: matrix.extra
+      run: |
+        git config --global --add safe.directory $GITHUB_WORKSPACE
+        if git grep -En 'g_auto\(|g_autoptr\(|g_autofree ' | grep -v = ; then
+            echo "Found g_auto* declarations without initializers"
+            exit 1
+        fi
+    - name: Build
+      run: |
+        autoreconf -i
+        if [ -n "${{ matrix.ignore-fd-leaks }}" ]; then
+            # Some distro versions have leaky libraries
+            echo "Disabling file descriptor leak check"
+            export CPPFLAGS="-DNONATOMIC_CLOEXEC"
+        fi
+        ./configure
+        make -j4 CFLAGS="-O2 -g -Werror"
+    - name: Check
+      run: |
+        trap "cat test-suite.log" EXIT
+        make check
+    - name: Cache pristine slides
+      uses: actions/cache@v2
+      with:
+        key: pristine
+        path: test/_slidedata/pristine
+    - name: Check for overlarge tests
+      if: matrix.extra
+      run: |
+        # We don't want to allow arbitrarily large binary diffs into the
+        # repo, where they'll live in the Git history forever.  At the time
+        # of writing, our largest xdelta diff is 4881 bytes.  Arbitrarily
+        # set the cutoff at 6000.
+        # https://openslide.org/docs/testsuite/#tips
+        THRESHOLD=6000
+        large=$(find test/cases -type f -size +${THRESHOLD}c)
+        if [ -n "$large" ]; then
+            echo "Found test case files larger than $THRESHOLD bytes:"
+            echo "$large"
+            exit 1
+        fi
+    # Can't cache frozen tests because cache doesn't handle sparse files
+    - name: Unpack tests
+      run: |
+        cd test
+        ./driver unfreeze
+        ./driver unpack nonfrozen
+    - name: Test
+      run: cd test && ./driver run
+    - name: Check exports
+      if: matrix.extra
+      run: cd test && ./driver exports
+
+  windows_setup:
+    name: Set up Windows build
+    runs-on: ubuntu-latest
+    outputs:
+      pkgver: ${{ steps.params.outputs.pkgver }}
+    steps:
+      - name: Calculate parameters
+        id: params
+        run: |
+          case "${{ github.event_name }}" in
+          pull_request)
+              echo "::set-output name=pkgver::pr-${{ github.event.number }}.${{ github.run_number }}.${{ github.run_attempt }}-$(echo ${{ github.sha }} | cut -c-7)"
+              ;;
+          push)
+              echo "::set-output name=pkgver::${GITHUB_REF#refs/heads/}-$(echo ${{ github.sha }} | cut -c-7)"
+              ;;
+          *)
+              echo "Unknown event type ${{ github.event_name }}"
+              exit 1
+          esac
+
+  windows_build:
+    name: Windows build
+    needs: windows_setup
+    uses: openslide/openslide-winbuild/.github/workflows/windows.yml@main
+    with:
+      openslide_repo: ${{ github.repository }}
+      openslide_ref: ${{ github.ref }}
+      pkgver: ${{ needs.windows_setup.outputs.pkgver }}
+      werror: true
+
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    container: registry.fedoraproject.org/fedora:latest
+    steps:
+    - name: Check out repo
+      uses: actions/checkout@v3
+    - name: Install tools
+      run: dnf install -y doxygen
+    - name: Build
+      run: |
+        basename=openslide-docs-$GITHUB_RUN_NUMBER-$(echo $GITHUB_SHA | cut -c-10)
+        mkdir artifact
+        cd doc
+        doxygen
+        mv html ../artifact/${basename}
+        echo "basename=${basename}" >> $GITHUB_ENV
+    - name: Archive
+      uses: actions/upload-artifact@v2
+      with:
+        name: ${{ env.basename }}
+        path: artifact
