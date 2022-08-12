@@ -18,7 +18,6 @@ jobs:
     name: Build
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
-    continue-on-error: ${{ matrix.failing || false }}
     strategy:
       matrix:
         include:
@@ -39,7 +38,6 @@ jobs:
             ignore-fd-leaks: true
           - os: ubuntu-22.04
           - os: macos-latest
-            failing: true
     steps:
     # Quick way to get Python 3 on macOS
     - name: Set up Python (macOS)
@@ -49,8 +47,9 @@ jobs:
       run: |
         case "${{ matrix.os }}" in
         macos-latest)
+            brew update
             brew install \
-                gcc make autoconf automake libtool pkg-config \
+                autoconf automake libtool pkg-config \
                 zlib \
                 libpng \
                 jpeg-turbo \
@@ -79,7 +78,7 @@ jobs:
                 9)
                     dnf install -y 'dnf-command(config-manager)'
                     dnf config-manager --set-enabled crb
-                    dnf copr enable -y bgilbert/xdelta
+                    dnf install -y epel-release epel-next-release
                     ;;
                 *)
                     extra=git-core
@@ -148,7 +147,10 @@ jobs:
             echo "Disabling file descriptor leak check"
             export CPPFLAGS="-DNONATOMIC_CLOEXEC"
         fi
-        ./configure
+        if ! ./configure; then
+            cat config.log
+            exit 1
+        fi
         make -j4 CFLAGS="-O2 -g -Werror"
     - name: Check
       run: |
