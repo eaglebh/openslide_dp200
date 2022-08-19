@@ -18,13 +18,13 @@ jobs:
     name: Build
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
-    continue-on-error: ${{ matrix.failing || false }}
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
             container: registry.fedoraproject.org/fedora:latest
-            extra: true
+            extra: extra checks
+            sanitize: sanitize
           - os: ubuntu-latest
             container: quay.io/centos/centos:stream8
           # Use ubuntu-22.04 to get a newer Docker seccomp filter.  Otherwise
@@ -34,23 +34,26 @@ jobs:
             container: quay.io/centos/centos:stream9
           - os: ubuntu-latest
             container: debian:stable
-            ignore-fd-leaks: true
+            ignore-cloexec-leaks: ignore CLOEXEC leaks
           - os: ubuntu-20.04
-            ignore-fd-leaks: true
+            ignore-cloexec-leaks: ignore CLOEXEC leaks
           - os: ubuntu-22.04
-          - os: macos-latest
-            failing: true
+          - os: macos-12
+            sanitize: sanitize
     steps:
     # Quick way to get Python 3 on macOS
     - name: Set up Python (macOS)
-      uses: actions/setup-python@v2
-      if: ${{ matrix.os == 'macos-latest' }}
+      uses: actions/setup-python@v4
+      if: ${{ startsWith(matrix.os, 'macos-') }}
+      with:
+        python-version: "3.10.x"
     - name: Install dependencies
       run: |
         case "${{ matrix.os }}" in
-        macos-latest)
+        macos-*)
+            brew update
             brew install \
-                gcc make autoconf automake libtool pkg-config \
+                autoconf automake libtool pkg-config \
                 zlib \
                 libpng \
                 jpeg-turbo \
@@ -61,7 +64,8 @@ jobs:
                 sqlite \
                 cairo \
                 glib \
-                xdelta
+                xdelta \
+                doxygen
             python -m pip install --upgrade pip
             pip install requests PyYAML
             ;;
@@ -79,16 +83,19 @@ jobs:
                 9)
                     dnf install -y 'dnf-command(config-manager)'
                     dnf config-manager --set-enabled crb
-                    dnf copr enable -y bgilbert/xdelta
+                    dnf install -y epel-release epel-next-release
                     ;;
                 *)
-                    extra=git-core
+                    extra="git-core clang llvm valgrind valgrind-devel"
+                    extra="$extra dnf-plugins-core"
+                    debuginfo=1
                     ;;
                 esac
 
                 dnf install -y \
                     gcc make autoconf automake libtool pkg-config \
                     $python python${pyver}-requests python${pyver}-pyyaml \
+                    diffutils \
                     zlib-devel \
                     libpng-devel \
                     libjpeg-turbo-devel \
@@ -101,6 +108,10 @@ jobs:
                     glib2-devel \
                     doxygen \
                     xdelta libjpeg-turbo-utils $extra
+
+                if [ -n "$debuginfo" ]; then
+                    dnf debuginfo-install -y cairo fontconfig glib2
+                fi
                 ;;
             *debian*|"")
                 if [ -n "${{ matrix.container }}" ]; then
@@ -143,12 +154,15 @@ jobs:
     - name: Build
       run: |
         autoreconf -i
-        if [ -n "${{ matrix.ignore-fd-leaks }}" ]; then
+        if [ -n "${{ matrix.ignore-cloexec-leaks }}" ]; then
             # Some distro versions have leaky libraries
-            echo "Disabling file descriptor leak check"
+            echo "Disabling CLOEXEC leak check"
             export CPPFLAGS="-DNONATOMIC_CLOEXEC"
         fi
-        ./configure
+        if ! ./configure; then
+            cat config.log
+            exit 1
+        fi
         make -j4 CFLAGS="-O2 -g -Werror"
     - name: Check
       run: |
@@ -182,6 +196,16 @@ jobs:
         ./driver unpack nonfrozen
     - name: Test
       run: cd test && ./driver run
+    - name: Sanitize
+      if: matrix.sanitize
+      run: cd test && ./driver sanitize
+    - name: Valgrind
+      # Valgrind tests are expensive, and maintaining suppressions across
+      # multiple distros can be fiddly.  We might catch some additional bugs
+      # if we enabled this everywhere (mainly when there are different code
+      # paths for different dependency versions) but it doesn't seem worth it.
+      if: matrix.extra
+      run: cd test && ./driver valgrind
     - name: Check exports
       if: matrix.extra
       run: cd test && ./driver exports
