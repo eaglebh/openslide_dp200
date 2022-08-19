@@ -180,18 +180,35 @@ static bool read_subtile(openslide_t *osr,
                                             level, tile_col, tile_row,
                                             &cache_entry);
   if (!tiledata) {
-    g_auto(_openslide_slice) box = _openslide_slice_alloc(tw * th * 4);
-    if (!_openslide_tiff_read_tile(tiffl, tiff,
-                                   box.p, tile_col, tile_row,
-                                   err)) {
+    // Slides with multiple AOIs are sparse, meaning the tiles between the AOIs
+    // are completely empty and need to be filled with transparent pixels.
+    bool is_missing;
+    if (!_openslide_tiff_check_missing_tile(tiffl, tiff,
+                                            tile_col, tile_row,
+                                            &is_missing, err)) {
       return false;
     }
 
-    // clip, if necessary
-    if (!_openslide_tiff_clip_tile(tiffl, box.p,
-                                   tile_col, tile_row,
-                                   err)) {
-      return false;
+    g_auto(_openslide_slice) box;
+    if (is_missing) {
+      // fill with transparent
+      box = _openslide_slice_alloc0(tw * th * 4);
+    } else {
+      box = _openslide_slice_alloc(tw * th * 4);
+      if (!_openslide_tiff_read_tile(tiffl, tiff,
+                                     box.p, tile_col, tile_row,
+                                     err)) {
+        g_slice_free1(tw * th * 4, tiledata);
+        return false;
+      }
+
+      // clip, if necessary
+      if (!_openslide_tiff_clip_tile(tiffl, box.p,
+                                     tile_col, tile_row,
+                                     err)) {
+        g_slice_free1(tw * th * 4, tiledata);
+        return false;
+      }
     }
 
     // put it in the cache
@@ -553,19 +570,18 @@ static struct bif *parse_level0_xml(const char *xml,
 
       // read joint values
       struct joint joint;
-      PARSE_DOUBLE_ATTRIBUTE_OR_FAIL(joint_info, ATTR_OVERLAP_X,
-                                     joint.offset_x);
+      PARSE_DOUBLE_ATTRIBUTE_OR_RETURN(joint_info, ATTR_OVERLAP_X,
+                                     joint.offset_x, NULL);
       joint.offset_x *= -1;
-      PARSE_DOUBLE_ATTRIBUTE_OR_FAIL(joint_info, ATTR_OVERLAP_Y,
-                                     joint.offset_y);
+      PARSE_DOUBLE_ATTRIBUTE_OR_RETURN(joint_info, ATTR_OVERLAP_Y,
+                                     joint.offset_y, NULL);
       joint.offset_y *= -1;
-      PARSE_INT_ATTRIBUTE_OR_FAIL(joint_info, ATTR_CONFIDENCE,
-                                  joint.confidence);
+      PARSE_INT_ATTRIBUTE_OR_RETURN(joint_info, ATTR_CONFIDENCE,
+                                  joint.confidence, NULL);
 
       // check coordinates against direction, and get joint
       g_autoptr(xmlChar) direction =
         xmlGetProp(joint_info, BAD_CAST ATTR_DIRECTION);
-      struct joint *joint;
       bool ok;
       bool direction_y = false;
       //g_debug("%s, tile1 %"PRId64" %"PRId64", tile2 %"PRId64" %"PRId64, (char *) direction, tile1_col, tile1_row, tile2_col, tile2_row);
@@ -574,13 +590,13 @@ static struct bif *parse_level0_xml(const char *xml,
         // Get the right tile.
         struct tile *tile =
           &area->tiles[tile2_row * area->tiles_across + tile2_col];
-        joint = &tile->left;
+        tile->offset_x = joint.offset_x;
         ok = (tile2_col == tile1_col + 1 && tile2_row == tile1_row);
       } else if (!xmlStrcmp(direction, BAD_CAST DIRECTION_UP)) {
         // Get the top tile.
         struct tile *tile =
           &area->tiles[tile1_row * area->tiles_across + tile1_col];
-        joint = &tile->top;
+        tile->offset_y = joint.offset_y;
         ok = (tile2_col == tile1_col && tile2_row == tile1_row - 1);
         direction_y = true;
       } else {
@@ -600,13 +616,13 @@ static struct bif *parse_level0_xml(const char *xml,
 
       // read values
       PARSE_DOUBLE_ATTRIBUTE_OR_RETURN(joint_info, ATTR_OVERLAP_X,
-                                       joint->offset_x, NULL);
-      joint->offset_x *= -1;
+                                       joint.offset_x, NULL);
+      joint.offset_x *= -1;
       PARSE_DOUBLE_ATTRIBUTE_OR_RETURN(joint_info, ATTR_OVERLAP_Y,
-                                       joint->offset_y, NULL);
-      joint->offset_y *= -1;
+                                       joint.offset_y, NULL);
+      joint.offset_y *= -1;
       PARSE_INT_ATTRIBUTE_OR_RETURN(joint_info, ATTR_CONFIDENCE,
-                                    joint->confidence, NULL);
+                                    joint.confidence, NULL);
 
       // add to totals
       if (direction_y) {
@@ -744,7 +760,7 @@ static struct _openslide_grid *create_bif_grid(openslide_t *osr,
       for (int64_t col = 0; col < area->tiles_across; col++) {
         if (is_dp200) {
           // use the tile offsets only for DP 200 scans.
-          struct tile *tile = area->tiles[row * area->tiles_across + col];
+          struct tile *tile = &area->tiles[row * area->tiles_across + col];
           offset_x += tile->offset_x;
           offset_ys[col] += tile->offset_y;
         }
